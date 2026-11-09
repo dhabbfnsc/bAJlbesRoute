@@ -1,0 +1,103 @@
+
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Extract project archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUTER=$(find . -maxdepth 1 -iname '*.zip' -type f | head -1)
+          test -n "$OUTER"
+
+          mkdir -p "$RUNNER_TEMP/extracted"
+          unzip -q "$OUTER" -d "$RUNNER_TEMP/extracted"
+
+          INNER=$(find "$RUNNER_TEMP/extracted" -iname '*.zip' -type f | head -1 || true)
+
+          if [ -n "$INNER" ]; then
+            mkdir -p "$RUNNER_TEMP/project"
+            unzip -q "$INNER" -d "$RUNNER_TEMP/project"
+            SOURCE="$RUNNER_TEMP/project"
+          else
+            SOURCE="$RUNNER_TEMP/extracted"
+          fi
+
+          PROJECT=$(find "$SOURCE" -type f -path '*/src-tauri/tauri.conf.json' -print -quit | sed 's#/src-tauri/tauri.conf.json##')
+
+          test -n "$PROJECT"
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+          echo "Found project: $PROJECT"
+
+      - name: Build unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          npm ci
+          npm run build
+
+          npx tauri ios init --ci
+
+          IOS_DIR="$PROJECT_DIR/src-tauri/gen/apple"
+          PROJECT_FILE="$IOS_DIR/bAJlbesRoute.xcodeproj"
+
+          test -d "$PROJECT_FILE"
+
+          xcodebuild \
+            -project "$PROJECT_FILE" \
+            -scheme bAJlbesRoute \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$IOS_DIR/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP=$(find "$IOS_DIR/build/Build/Products" -type d -name '*.app' -print -quit)
+
+          test -n "$APP"
+
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+          cp -R "$APP" "$GITHUB_WORKSPACE/Payload/"
+
+          cd "$GITHUB_WORKSPACE"
+          zip -qry bAJlbesRoute-unsigned.ipa Payload
+
+          test -s bAJlbesRoute-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: bAJlbesRoute-IPA
+          path: bAJlbesRoute-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
