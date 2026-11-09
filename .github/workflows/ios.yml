@@ -75,7 +75,7 @@ jobs:
 
           xcodebuild \
             -project "$PROJECT_FILE" \
-            -scheme bajlbesroute \
+            -scheme bajlbesroute_iOS \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
