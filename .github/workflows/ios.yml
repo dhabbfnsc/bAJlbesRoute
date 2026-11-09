@@ -1,23 +1,73 @@
 
-name: Build unsigned iOS IPA
+name: iOS (unsigned IPA)
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    tags:
+      - "ios-v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
+    name: Build unsigned iOS IPA
     runs-on: macos-15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Find and extract project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SEARCH_DIR="$GITHUB_WORKSPACE"
+          PROJECT_DIR=""
+
+          for DEPTH in 1 2 3 4; do
+            PACKAGE_JSON=$(find "$SEARCH_DIR" \
+              -type f \
+              -name package.json \
+              -not -path '*/node_modules/*' \
+              -print -quit)
+
+            if [ -n "$PACKAGE_JSON" ]; then
+              PROJECT_DIR=$(dirname "$PACKAGE_JSON")
+              break
+            fi
+
+            ZIP_FILE=$(find "$SEARCH_DIR" \
+              -type f \
+              -name '*.zip' \
+              -print -quit)
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: Project ZIP was not found."
+              exit 1
+            fi
+
+            EXTRACT_DIR="$GITHUB_WORKSPACE/.ios-source-$DEPTH"
+            mkdir -p "$EXTRACT_DIR"
+
+            echo "Extracting: $ZIP_FILE"
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+            SEARCH_DIR="$EXTRACT_DIR"
+          done
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: package.json was not found after extraction."
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | head -100
+            exit 1
+          fi
+
+          echo "Project directory: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -27,80 +77,79 @@ jobs:
         with:
           targets: aarch64-apple-ios
 
-      - name: Extract project archives
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ env.PROJECT_DIR }}/src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm ci
+
+      - name: Initialize iOS project
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          OUTER=$(find . -maxdepth 1 -iname '*.zip' -type f | head -1)
-          test -n "$OUTER"
-
-          mkdir -p "$RUNNER_TEMP/extracted"
-          unzip -q "$OUTER" -d "$RUNNER_TEMP/extracted"
-
-          INNER=$(find "$RUNNER_TEMP/extracted" -iname '*.zip' -type f | head -1 || true)
-
-          if [ -n "$INNER" ]; then
-            mkdir -p "$RUNNER_TEMP/project"
-            unzip -q "$INNER" -d "$RUNNER_TEMP/project"
-            SOURCE="$RUNNER_TEMP/project"
-          else
-            SOURCE="$RUNNER_TEMP/extracted"
+          if [ ! -d "src-tauri/gen/apple" ]; then
+            npx tauri ios init --ci
           fi
 
-          PROJECT=$(find "$SOURCE" -type f -path '*/src-tauri/tauri.conf.json' -print -quit | sed 's#/src-tauri/tauri.conf.json##')
+          if [ ! -d "src-tauri/gen/apple" ]; then
+            echo "ERROR: Tauri did not generate the iOS project."
+            exit 1
+          fi
 
-          test -n "$PROJECT"
-          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
-          echo "Found project: $PROJECT"
-
-      - name: Build unsigned IPA
+      - name: Build unsigned IPA with Tauri
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
 
-          npm ci
-          npm run build
+          npx tauri ios build --ci --no-sign --verbose
 
-          npx tauri ios init --ci
+      - name: Find and prepare IPA
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          IOS_DIR="$PROJECT_DIR/src-tauri/gen/apple"
-          PROJECT_FILE="$IOS_DIR/bajlbesroute.xcodeproj"
+          BUILD_DIR="src-tauri/gen/apple/build"
 
-          test -d "$PROJECT_FILE"
-          echo "=== AVAILABLE XCODE SCHEMES ==="
-          xcodebuild -list -project "$PROJECT_FILE"
-          echo "=== END SCHEMES ==="
+          IPA_FILE=$(find "$BUILD_DIR" \
+            -type f \
+            -name '*.ipa' \
+            -print -quit)
 
-          xcodebuild \
-            -project "$PROJECT_FILE" \
-            -scheme bajlbesroute_iOS \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$IOS_DIR/build" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+          if [ -z "$IPA_FILE" ]; then
+            echo "ERROR: IPA was not generated."
+            echo "Build directory contents:"
+            find "$BUILD_DIR" -maxdepth 7 -print || true
+            exit 1
+          fi
 
-          APP=$(find "$IOS_DIR/build/Build/Products" -type d -name '*.app' -print -quit)
+          echo "Found IPA: $IPA_FILE"
 
-          test -n "$APP"
+          cp "$IPA_FILE" "$GITHUB_WORKSPACE/bAJlbesRoute-unsigned.ipa"
 
-          mkdir -p "$GITHUB_WORKSPACE/Payload"
-          cp -R "$APP" "$GITHUB_WORKSPACE/Payload/"
+          test -s "$GITHUB_WORKSPACE/bAJlbesRoute-unsigned.ipa"
 
-          cd "$GITHUB_WORKSPACE"
-          zip -qry bAJlbesRoute-unsigned.ipa Payload
+          echo "IPA successfully prepared."
+          ls -lh "$GITHUB_WORKSPACE/bAJlbesRoute-unsigned.ipa"
 
-          test -s bAJlbesRoute-unsigned.ipa
-
-      - name: Upload IPA
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bAJlbesRoute-IPA
+          name: bAJlbesRoute-iOS-unsigned
           path: bAJlbesRoute-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
+
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bAJlbesRoute-unsigned.ipa
+          draft: true
