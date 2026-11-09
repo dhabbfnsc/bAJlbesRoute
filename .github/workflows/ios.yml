@@ -66,13 +66,13 @@ jobs:
           npx tauri ios init --ci
 
           IOS_DIR="$PROJECT_DIR/src-tauri/gen/apple"
-          PROJECT_FILE="$IOS_DIR/bAJlbesRoute.xcodeproj"
+          PROJECT_FILE="$IOS_DIR/bajlbesroute.xcodeproj"
 
           test -d "$PROJECT_FILE"
 
           xcodebuild \
             -project "$PROJECT_FILE" \
-            -scheme bAJlbesRoute \
+            -scheme bajlbesroute \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
